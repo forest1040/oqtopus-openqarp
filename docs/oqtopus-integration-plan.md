@@ -5,6 +5,7 @@
 ## 方針と要求
 
 - 公開 API は `OpenQARPOqtopusSampler(device_id=..., client=...)`。`device_id` は必須のキーワード引数としてインスタンス生成時に指定し、作成する全ジョブに反映する。固定の接続先をコードに埋め込まない。
+- 今回の接続・サンプリング検証には利用者指定の `device_id="qulacs"` を使用する。他の device_id も指定できる API は維持する。
 - 期待値計算には `OpenQARPOqtopusEstimator(sampler=...)` を用意し、Sampler と接続先・認証・送信処理を共有する。
 - OQTOPUS との通信は `oqtopus-client` の公開 API を使う。
 - Python は uv 管理。クローンを参照する開発環境の依存関係はルートの `pyproject.toml` と `uv.lock` で管理する。
@@ -46,9 +47,21 @@ MPLCONFIGDIR=artifacts/matplotlib uv run --locked python -m pytest -c ref/openqa
 | 明示的な終端測定のある Bell 回路 | 同じ二つの状態のみ |
 | OpenQASM 3 出力と SDK 入力生成 | 測定を含む文字列を `OqtopusJobSpec.sampling` に渡せる |
 
-SDK の入力オブジェクト生成はオフラインの確認であり、サーバの QASM 受理・認証・bitstring の意味まで検証するものではない。リモート接続と実機動作は未検証。全 upstream テスト、化学・GPU・他 SDK 連携は今回の検証範囲外。
+SDK の入力オブジェクト生成はオフラインの確認であり、サーバの QASM 受理・bitstring の意味まで検証するものではない。認証とリモート接続は後述のデバイス情報取得で確認した。リモートジョブ送信と実機動作は未検証。全 upstream テスト、化学・GPU・他 SDK 連携は今回の検証範囲外。
 
 2026-10-28 の実行結果: 上記ビルド・スモークは exit 0。Bell の確率は `(0,0)=0.48875`、`(1,1)=0.51125`、期待値は `1.4999999999999998`。X(q0) / X(q1) はそれぞれ `(1,0)` / `(0,1)` に確率 1。OpenQASM 3.0 と SDK 入力生成も成功した。関連 upstream テストは **90 passed in 2.41s**、skip/failure なし。`qarp` は参照クローン、`qarpx` はこの `.venv` にビルドされたネイティブ拡張から読み込まれ、ABI/ソースディレクトリのチェックを通過した。
+
+### 既存接続環境の確認
+
+利用者提供の `/Users/tmori/temp/oqt-cloud/a.py` を読み取り確認した。quri-parts-oqtopus で Bell 回路を `qulacs` に 1,000 shots 送る例である。既存コードや環境は変更していない。
+
+既存設定は `~/.oqtopus` の `[default]` セクションにあり、`url` / `api_token` を持つ。oqtopus-client の既定パスとは異なるため `OqtopusConfig.from_file("default", path="~/.oqtopus")` で明示的に読み込む。設定内容はリポジトリに保存しない。`conf.py` は設定ファイルを書き込むコードなので実行していない。
+
+```sh
+uv run --locked python scripts/check_oqtopus_connection.py --config ~/.oqtopus --section default --device-id qulacs
+```
+
+2026-10-28 に oqtopus-client 1.3.0 の `get_device("qulacs")` が成功した。返却情報は `device_type=simulator`、`status=available`、`n_qubits=16`、basis gates は `sx, x, rz, cx`。supported instructions は `measure` と前後空白を含む ` barrier` が返った。メタデータの文字列は検証時に扱いを確認する。これは当日の状態であり、実行時にも再取得する。ジョブ送信はしていない。
 
 ## 必要なインターフェイス
 
@@ -70,7 +83,7 @@ from openqarp_oqtopus import OpenQARPOqtopusSampler, OpenQARPOqtopusEstimator
 
 client = OqtopusClient(config)  # config: 利用者が用意した OqtopusConfig
 sampler = OpenQARPOqtopusSampler(
-    device_id="qulacs",  # SDK の例にある接続先。利用環境で存在を確認する
+    device_id="qulacs",  # 今回使用するシミュレータ
     client=client,
     n_shots=1000,
     timeout=300.0,
@@ -155,4 +168,4 @@ mock 試験に加えて解析値との数値比較を持つ。別の自作変換
 
 ## 次段階で確認する運用情報
 
-Sampler の実装と mock 試験はこの計画で進められる。リモート検証には利用先の config と有効な device_id、server/transpiler の対応 QASM・ゲート、利用可能 shots 範囲が必要。実機利用ではさらに topology と結果ビット順の契約を確認する。
+Sampler の実装と mock 試験はこの計画で進められる。接続先は `qulacs`、既存 config での認証とデバイス情報取得は確認済み。リモート実行時に server/transpiler の対応 QASM・ゲート、利用可能 shots 範囲と結果ビット順を検証する。実機対応へ進む際には追加で topology と配置の契約を確認する。

@@ -41,4 +41,15 @@ MPLCONFIGDIR=artifacts/matplotlib uv run --locked python -m pytest \
   ref/openqarp/tests/test_postselection.py -q
 ```
 
-認証付きの接続検証は次段階です。公開 API 案では `OpenQARPOqtopusSampler(device_id=..., client=...)` に接続先を指定し、`OpenQARPOqtopusEstimator(sampler=...)` が同じ接続を使います。
+## OQTOPUS 接続確認
+
+接続先は `qulacs` を使用します。既存の `/Users/tmori/temp/oqt-cloud/a.py` は quri-parts-oqtopus を使用していますが、同じ設定を oqtopus-client でも利用できることを確認しました。設定ファイルはコピーせず、明示的に指定します。
+
+```sh
+uv run --locked python scripts/check_oqtopus_connection.py \
+  --config ~/.oqtopus --section default --device-id qulacs
+```
+
+2026-10-28 にデバイス情報の取得に成功しました。`qulacs` は `simulator`、`available`、16量子ビットです。この確認はジョブを送信しません。設定の値やトークンは出力しません。
+
+公開 API 案では `OpenQARPOqtopusSampler(device_id="qulacs", client=client)` に接続先を指定し、`OpenQARPOqtopusEstimator(sampler=sampler)` が同じ接続を使います。QASM のリモート実行と結果ビット順の検証は次段階です。
