@@ -1,0 +1,9 @@
+include README.md pyproject.toml
+graft src/openqarp_oqtopus
+prune ref
+prune artifacts
+prune .venv
+prune .uv-cache
+prune build
+prune dist
+global-exclude __pycache__ *.py[cod]

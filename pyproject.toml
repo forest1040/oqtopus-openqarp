@@ -6,11 +6,15 @@ build-backend = "setuptools.build_meta"
 name = "openqarp-oqtopus"
 version = "0.1.0"
 description = "OpenQARP sampling and estimation through OQTOPUS Cloud"
+readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "openqarp",
-    "oqtopus-client",
+    "openqarp @ git+https://github.com/OpenQARP/openqarp.git@6c632b9a66383584a5944685abb81d33900c5836",
+    "oqtopus-client>=1.3,<2",
 ]
+
+[project.optional-dependencies]
+qiskit = ["qiskit>=2.3,<3"]
 
 [dependency-groups]
 dev = [
@@ -24,6 +28,9 @@ oqtopus-client = { path = "ref/oqtopus-client", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+openqarp_oqtopus = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

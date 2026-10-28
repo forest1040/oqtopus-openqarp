@@ -126,7 +126,7 @@ def test_identity_only_checks_sdk_shot_limit():
 
     est, client = estimator()
     with pytest.raises(CapabilityError):
-        est.estimate(ket=SimpleBlock(1), operator=QubitOperator("", 1), n_shots=10_000_001)
+        est.estimate(ket=SimpleBlock(1), operator=QubitOperator("", 1), n_shots=10_001)
     assert not client.jobs
 
 

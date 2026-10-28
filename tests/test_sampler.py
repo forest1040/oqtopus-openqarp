@@ -69,7 +69,7 @@ def test_sample_bell_counts_and_records_job():
     assert result[(0, 0)] == pytest.approx(0.501)
     assert result[(1, 1)] == pytest.approx(0.499)
     assert sum(result.values()) == pytest.approx(1)
-    assert client.devices == ["qulacs"]
+    assert client.devices == []
     assert client.submitted[0].shots == 1000
     assert client.submitted[0].device_id == "qulacs"
     assert client.waited == [("job-0", 12)]
@@ -213,16 +213,43 @@ def test_sweep_preflights_all_parameter_sets_before_sending():
     assert not client.submitted
 
 
-def test_capacity_and_runtime_mutations_are_checked():
+def test_runtime_shot_mutations_are_checked():
     sampler, client = make_sampler([])
-    with pytest.raises(CapabilityError):
-        sampler.sample(ket=SimpleBlock(17))
-    assert not client.submitted
     primitive = Sampler(ket=bell_block())
     sampler.executor.build([primitive])
     primitive.n_shots = qarp.EXACT
     with pytest.raises(CapabilityError):
         sampler.executor.run()
+    assert not client.submitted
+
+
+def test_device_capacity_is_left_to_the_server():
+    sampler, client = make_sampler([{0: 8}], n_shots=8)
+    sampler.sample(ket=SimpleBlock(17))
+    assert len(client.submitted) == 1
+    assert not client.devices
+
+
+def test_gate_stream_is_emitted_without_local_transpilation(monkeypatch):
+    import qarpx as qx
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Local transpilation must not be invoked")
+
+    monkeypatch.setattr(qx, "Transpiler", forbidden)
+    sampler, client = make_sampler([{0: 8}], n_shots=8)
+    block = SimpleBlock(2)
+    block.cz(0, 1)
+    sampler.sample(ket=block)
+    assert "cz q[0], q[1]" in client.submitted[0].program
+    assert not client.devices
+
+
+@pytest.mark.parametrize("shots", [10_001, 0, -1, True, 1.5])
+def test_shot_limits_are_enforced_before_submission(shots):
+    sampler, client = make_sampler([])
+    with pytest.raises(CapabilityError):
+        sampler.sample(ket=SimpleBlock(1), n_shots=shots)
     assert not client.submitted
 
 
