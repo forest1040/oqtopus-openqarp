@@ -1,7 +1,11 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "oqtopus-openqarp-workspace"
+name = "openqarp-oqtopus"
 version = "0.1.0"
-description = "Local OpenQARP verification and OQTOPUS integration planning"
+description = "OpenQARP sampling and estimation through OQTOPUS Cloud"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "openqarp",
@@ -17,3 +21,10 @@ dev = [
 [tool.uv.sources]
 openqarp = { path = "ref/openqarp", editable = true }
 oqtopus-client = { path = "ref/oqtopus-client", editable = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"

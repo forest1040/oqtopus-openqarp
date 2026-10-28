@@ -1,6 +1,6 @@
 # OpenQARP の OQTOPUS 対応プラン
 
-作成日: 2026-10-28。状態: 設計案。今回の範囲は uv 環境構築、ローカル動作検証、実装計画の保存。OQTOPUS 向けアダプタの実装・リモートジョブ送信は次段階。
+作成日: 2026-10-28。状態: Sampler / Estimator の基本実装と qulacs でのクラウド検証完了。最初に uv 環境構築・ローカル検証・設計を行い、利用者の続行指示後に以下の実装とリモート検証を実施した。
 
 ## 方針と要求
 
@@ -23,7 +23,7 @@
 
 uv の path 依存は参照先の Git コミットを固定しない。新規環境では README の手順で上記コミットを用意し、`uv sync --locked` を実行する。更新時はコミット・lock・検証結果を一緒に見直す。
 
-terra は Engine・QASM・SDK・結果変換の設計調査、luna はネイティブビルド・公開 API・検証対象の調査を担当。主担当がソースを確認し、環境構築・実行検証・本計画の統合を行った。
+terra は 実行層・QASM・SDK・結果変換の設計調査、luna はネイティブビルド・公開 API・検証対象の調査を担当。主担当がソースを確認し、環境構築・実行検証・本計画の統合を行った。
 
 ## ローカル検証
 
@@ -47,7 +47,7 @@ MPLCONFIGDIR=artifacts/matplotlib uv run --locked python -m pytest -c ref/openqa
 | 明示的な終端測定のある Bell 回路 | 同じ二つの状態のみ |
 | OpenQASM 3 出力と SDK 入力生成 | 測定を含む文字列を `OqtopusJobSpec.sampling` に渡せる |
 
-SDK の入力オブジェクト生成はオフラインの確認であり、サーバの QASM 受理・bitstring の意味まで検証するものではない。認証とリモート接続は後述のデバイス情報取得で確認した。リモートジョブ送信と実機動作は未検証。全 upstream テスト、化学・GPU・他 SDK 連携は今回の検証範囲外。
+SDK の入力オブジェクト生成はオフラインの確認であり、サーバの QASM 受理・bitstring の意味は別途クラウド検証で確認した。認証とリモート接続は後述のデバイス情報取得で確認した。実機動作、全 upstream テスト、化学・GPU・他 SDK 連携は今回の検証範囲外。
 
 2026-10-28 の実行結果: 上記ビルド・スモークは exit 0。Bell の確率は `(0,0)=0.48875`、`(1,1)=0.51125`、期待値は `1.4999999999999998`。X(q0) / X(q1) はそれぞれ `(1,0)` / `(0,1)` に確率 1。OpenQASM 3.0 と SDK 入力生成も成功した。関連 upstream テストは **90 passed in 2.41s**、skip/failure なし。`qarp` は参照クローン、`qarpx` はこの `.venv` にビルドされたネイティブ拡張から読み込まれ、ABI/ソースディレクトリのチェックを通過した。
 
@@ -63,19 +63,36 @@ uv run --locked python scripts/check_oqtopus_connection.py --config ~/.oqtopus -
 
 2026-10-28 に oqtopus-client 1.3.0 の `get_device("qulacs")` が成功した。返却情報は `device_type=simulator`、`status=available`、`n_qubits=16`、basis gates は `sx, x, rz, cx`。supported instructions は `measure` と前後空白を含む ` barrier` が返った。メタデータの文字列は検証時に扱いを確認する。これは当日の状態であり、実行時にも再取得する。ジョブ送信はしていない。
 
+### アダプタのクラウド検証結果
+
+デバイス情報取得後、実装したアダプタから `qulacs` に以下の8ジョブを送信した。すべて1,000 shots、`succeeded`。認証設定は既存ファイルを参照し、リポジトリにコピーしていない。
+
+| 回路・計算 | 解析値 | 結果 |
+|---|---|---|
+| X(q0) / X(q1) | `(1,0)` / `(0,1)` に確率1 | 一致。追加のビット反転なし |
+| Bell | `(0,0)` / `(1,1)` に確率約0.5 | 0.521 / 0.479 |
+| Bell の ZZ + 0.5 XX | 1.5 | 1.5 |
+| X(q0) 状態の Z0 − 2 Z1 | −3 | −3.0 |
+| Ry(0), Ry(π/3), Ry(π) の P(1) | 0, 0.25, 1 | 0, 0.255, 1 |
+| 恒等項だけの期待値 | 2.5、追加送信0回 | 一致 |
+
+実行コマンドは README の `examples/oqtopus_sampling.py` / `examples/oqtopus_estimation.py` を参照。ジョブIDと結果は Git 管理外の `artifacts/remote-sampling.json` / `artifacts/remote-estimation.json` に保存した。
+
+アダプタのオフライン試験は **37 passed**。解析値に加え、shots・パラメータ・測定配置・結果不整合・能力検査・失敗時のジョブID保持を確認した。パッケージ化後の関連 upstream 試験も **90 passed**。terra が Estimator 試験と実装レビュー、luna が Sampler 試験を担当した。
+
 ## 必要なインターフェイス
 
 | インターフェイス | 責務 | 対応順 |
 |---|---|---|
 | `OpenQARPOqtopusSampler` | device_id 保持、有限 shots 測定、パラメータ束縛、`SamplingDistribution` 返却 | 最初 |
 | `OpenQARPOqtopusEstimator` | OpenQARP `PauliAveraging` を使う期待値計算。Sampler と通信層を共有 | 次 |
-| 内部 `_OqtopusEngine(Engine)` と `sampler.engine` | 既存 `Sampler` / `PauliAveraging` / 複合アルゴリズムとの互換、build/run/batch_run | Sampler と同時 |
+| 内部 `_OqtopusCloudExecutor` と `sampler.executor` | 既存 `Sampler` / `PauliAveraging` / 複合アルゴリズムとの互換、build/run/batch_run | Sampler と同時 |
 | 実行履歴・ジョブ情報 | job_id、device_id、shots、状態、失敗回路の追跡 | Sampler と同時 |
 | デバイス情報参照 | SDK の量子ビット数・対応命令などを検証に使用 | 必要な範囲で追加 |
 
 独自の Device 階層は最初から設けない。OQTOPUS の `device_id` と OpenQARP の受動的な `Device` は異なる責務を持つ。接続先のノイズやトポロジーを、根拠なく OpenQARP の Device に変換しない。
 
-API 案（未実装）:
+公開 API:
 
 ```python
 from oqtopus_client import OqtopusClient, OqtopusConfig
@@ -94,27 +111,27 @@ value = estimator.estimate(ket=block, operator=hamiltonian, params={theta: 0.2})
 
 # OpenQARP 標準プリミティブとも同じ実行層を利用する
 from qarp.algorithms import Sampler
-sampler.engine.build([Sampler(ket=block, n_shots=1000)])
-results = sampler.engine.run(params={theta: 0.2})
+sampler.executor.build([Sampler(ket=block, n_shots=1000)])
+results = sampler.executor.run(params={theta: 0.2})
 ```
 
-`sample` は既存の `Sampler`、`estimate` は既存の `PauliAveraging` を生成して同じ engine に委譲する。`measured_qubits` を sample に渡せるようにし、周辺化は OpenQARP の既存処理へ委譲する。device_id はインスタンスの読取専用設定とし、変更時は別インスタンスを作る。外部注入された client の設定を改変・自動 close しない。初期版の同一インスタンスでの並行呼出しは非対応とし、必要なら別インスタンスを使う。
+`sample` は既存の `Sampler`、`estimate` は既存の `PauliAveraging` を生成して同じ実行層に委譲する。`measured_qubits` を sample に渡せるようにし、周辺化は OpenQARP の既存処理へ委譲する。device_id はインスタンスの読取専用設定とし、変更時は別インスタンスを作る。外部注入された client の設定を改変・自動 close しない。初期版の同一インスタンスでの並行呼出しは非対応とし、必要なら別インスタンスを使う。
 
 ## 実装設計
 
 ### OpenQARP と接続する位置
 
-`ref/openqarp/qarp/engines/_engine.py` の既存 `Engine` を継承する。`_compile_one`、`_compile_stamp`、`_dispatch_one`、`_sweep` と検証 hook を実装し、テンプレートである build/run/batch_run を再実装しない。
+`ref/openqarp/qarp/engines/_engine.py` の既存の実行基底クラスを継承する。独自クラス名は `_OqtopusCloudExecutor` とし、公開プロパティは `sampler.executor` とする。oqtopus-client を使ってクラウド API に接続する。`_compile_one`、`_compile_stamp`、`_dispatch_one`、`_sweep` と検証 hook を実装し、テンプレートである build/run/batch_run を再実装しない。
 
 - `_compile_one`: フラット命令の対応可否と幅を検査し、測定対応を確定する。初期版のローカル routing は行わない。
 - `_compile_stamp`: クラス、device_id、QASM/分解・測定方針などコンパイルに影響する設定を含め、異なる接続先のコンパイル結果を流用しない。
 - `_dispatch_one`: 名前によるパラメータ束縛 → QASM → SDK ジョブ → counts 変換 → `prim.run(results)`。複数回路でも順序を保つ。
 - `_sweep`: パラメータ集合 × primitive × circuit の対応を保持。最初は順次実行し、SDK バッチ化は後から追加する。
 - `provides_amplitudes` は明示的に False とする。基底クラスの既定値 True を継承すると、未対応の StateVector を誤って受理する。
-- shots の優先順位は呼出し override > primitive > engine 既定。`sampler.sample` の override も同じ規則で実行層に渡す。
-- `sampler.engine` では既存の `run_gradient` 等も表面に現れるため、初期版は gradient_methods を空にして、未対応要求を `CapabilityError` で拒否する。
+- shots の優先順位は呼出し override > primitive > executor 既定。`sampler.sample` の override も同じ規則で実行層に渡す。
+- `sampler.executor` では既存の `run_gradient` 等も表面に現れるため、初期版は gradient_methods を空にして、未対応要求を `CapabilityError` で拒否する。
 
-Engine の hook や結果形式には private API が含まれるため、OpenQARP のコミット固定と互換テストが必要。クローンへの monkey patch は避ける。
+実行層の hook や結果形式には private API が含まれるため、OpenQARP のコミット固定と互換テストが必要。クローンへの monkey patch は避ける。
 
 ### QASM と測定
 
@@ -132,7 +149,11 @@ OpenQARP 内部は整数の bit i が qubit i、外部表示は LSB 順タプル
 
 OpenQARP の `distribution_from_result` / `outcome_arrays` に合わせ、`counts: dict[int, int]`、`n_shots`、`n_qubits` を持つ内部結果型を作る。`qx.SamplingResult` の直接生成は前提にしない。空結果・負数/非整数カウント・範囲外キー・不足 shots を検査し、正規化で不整合を隠さない。初期版は counts 合計が要求 shots と一致することを要求する。緩和後の準確率と divided_counts は別の契約が必要なので未対応とする。
 
-同期 client の run_sampling は完了待ちをする。sample/estimate/run/batch_run は同期 API として明記する。タイムアウトは遠隔ジョブの取消しと同義ではない。SDK のステータス callback 等で job_id を保持できるかを確かめ、困難なら submit→wait→結果取得の公開 API を使う。送信後の例外で同じ回路を自動再送しない。失敗・取消・タイムアウトを区別し、元の SDK 例外と job_id を保持する。
+実装では job_id を確実に保持できる `submit_job` → `wait_for_job` の公開 API を使用する。sample/estimate/run/batch_run は同期 API。SDK の wait は失敗・取消状態でも結果を返すため、status が succeeded の場合だけ counts を読む。タイムアウトは遠隔ジョブの取消しと同義ではない。失敗・取消・タイムアウトを区別し、元の SDK 例外は cause として保持する。job_id は例外と `sampler.jobs` に残す。SDK 内部の登録・アップロード中に例外が起きた場合は job_id を得られない可能性がある。自動再送はしない。
+
+サーバ側変換は既存 a.py と同じ `transpiler_lib=qiskit`、`optimization_level=2` を既定とした。ローカルでは H/X/Rx/Ry/Rz/CX と測定・Barrier の標準ゲートに分解し、制御ゲート分解後のトップレベル GPhase は測定確率に影響しないため省く。QASM の手書き生成はしない。緩和は既定で無効。SDK schema の shots 範囲1〜10,000,000とデバイスの量子ビット容量を検証する。
+
+`batch_run` は全パラメータ集合を送信前に検証する。単一 primitive の複数測定回路も一括準備する。一方、`executor.run` で複数 primitive を直接扱う場合は primitive 単位で準備・送信するため、後続の検証や実行が失敗しても先行ジョブは残る。バッチ実行を含め、複数ジョブの取消しやトランザクションは提供しない。
 
 ### Estimator
 
@@ -158,14 +179,14 @@ mock 試験に加えて解析値との数値比較を持つ。別の自作変換
 
 ## 段階とファイル配置
 
-1. 環境・基準確認: 今回の uv、ignore、ローカル検証、計画保存。
-2. Sampler: `src/openqarp_oqtopus/{__init__,sampler,_engine,_results}.py`、`tests/test_sampler.py`。`device_id` 必須の constructor、Engine 接続、QASM、counts、エラーとジョブ履歴を実装。mock での完了を先に確認する。
-3. OQTOPUS simulator 検証: `examples/oqtopus_sampling.py`、任意実行の結合試験。X0/X1、Bell、パラメータ sweep を実行し、bit order と受理ゲートの契約を確定する。
-4. Estimator: `src/openqarp_oqtopus/estimator.py`、`tests/test_estimator.py`、`examples/oqtopus_estimation.py`。PauliAveraging 連携を完成させ、期待値と複数測定グループを検証する。
-5. 実機・発展: デバイス制約、配置の逆変換、必要に応じたバッチ最適化、SDK run_estimation、ジョブの再取得、対応可能な勾配。初期版の利用に必須にはしない。
+- [x] 環境・基準確認: uv、ignore、ローカル検証、計画保存。
+- [x] Sampler: `src/openqarp_oqtopus/{__init__,sampler,_executor,_results}.py`、`tests/test_sampler.py`。`device_id` 必須の constructor、実行層、QASM、counts、エラーとジョブ履歴を実装。
+- [x] OQTOPUS simulator 検証: `examples/oqtopus_sampling.py`。X0/X1 と Bell で bit order と受理ゲートを確認。
+- [x] Estimator: `src/openqarp_oqtopus/estimator.py`、`tests/test_estimator.py`、`examples/oqtopus_estimation.py`。PauliAveraging と接続し、解析的な期待値・測定基底変換・パラメータ sweep を確認。
+- [ ] 実機・発展: topology、配置の逆変換、必要に応じたバッチ最適化、SDK run_estimation、対応可能な勾配。初期版の利用に必須にはしない。HPC での直接接続も将来の別方式として扱う。
 
-実装時に `pyproject.toml` の src パッケージ設定と依存関係を追加する。OpenQARP に oqtopus-client を必須依存として追加しない。上流に取り込む場合は `AGENTS.md` と `docs/contracts/qarp_conventions.md` §14/15/17/18 に従い、SDK の遅延 import・optional export を含めて上流用計画を `docs/contributions/` に起こし、上流の Draft PR / green-light 手順に従う。今回の外部アダプタ計画に上流 PR の作成は含まない。
+`pyproject.toml` に src パッケージ設定を追加し、`openqarp-oqtopus` として editable install した。OpenQARP に oqtopus-client を必須依存として追加していない。上流に取り込む場合は `AGENTS.md` と `docs/contracts/qarp_conventions.md` §14/15/17/18 に従い、SDK の遅延 import・optional export を含めて上流用計画を `docs/contributions/` に起こし、上流の Draft PR / green-light 手順に従う。今回の外部アダプタ計画に上流 PR の作成は含まない。
 
 ## 次段階で確認する運用情報
 
-Sampler の実装と mock 試験はこの計画で進められる。接続先は `qulacs`、既存 config での認証とデバイス情報取得は確認済み。リモート実行時に server/transpiler の対応 QASM・ゲート、利用可能 shots 範囲と結果ビット順を検証する。実機対応へ進む際には追加で topology と配置の契約を確認する。
+`qulacs` の認証、デバイス情報、基本 QASM、サーバ側変換、ビット順、Sampler/Estimator/sweep のリモート実行は確認済み。他デバイスや実機に拡張する際は対応命令・shots 範囲・topology・配置の契約を追加検証する。
