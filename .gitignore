@@ -1,0 +1,7 @@
+/ref/openqarp/
+/ref/oqtopus-client/
+/.venv/
+/.uv-cache/
+/artifacts/
+__pycache__/
+.pytest_cache/
