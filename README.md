@@ -174,3 +174,14 @@ MPLCONFIGDIR=artifacts/matplotlib uv run --locked --extra qiskit python examples
 ```
 
 このコマンドは7つのsamplingジョブを送信します。既存JSONからMarkdownだけを再生成する場合は `--render artifacts/openqarp-examples/results.json` を使います。
+
+## OpenQARP examples のnative Estimator実行結果
+
+期待値計算の例も4ケース選び、回路とobservable全体を渡すnative estimationで各2,000 shots実行しました。HEA回路2条件と3量子ビットIsingモデルのVQE最終状態は成功しました。4量子ビットの計算基底状態は、サーバが量子ビット数を3としてobservableのindex 3を拒否するエラーになりました。成功3件・失敗1件の参照値、期待値、サーバstds、ジョブIDと応答を [Estimator実行結果](docs/openqarp-estimator-examples-results.md) に保存しています。VQEの最適化はローカルです。
+
+```sh
+MPLCONFIGDIR=artifacts/matplotlib uv run --locked --extra qiskit python examples/run_openqarp_estimator_examples.py \
+  --config ~/.oqtopus --device-id qulacs --shots 2000
+```
+
+このコマンドは4つのnative estimationジョブを送信します。`--render artifacts/openqarp-estimator-examples/results.json` で保存済み結果からMarkdownだけを再生成できます。
