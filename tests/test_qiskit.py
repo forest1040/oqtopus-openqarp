@@ -47,7 +47,10 @@ class MockClient:
     def wait_for_job(self, job_id, *, timeout):
         self.waited.append((job_id, timeout))
         index = int(job_id.removeprefix("job-"))
-        counts = self.counts[index]
+        output = self.counts[index]
+        if not isinstance(output, dict):
+            return output
+        counts = output
         return SimpleNamespace(
             status="succeeded",
             counts_with_integer_keys=lambda: {"counts": counts},
@@ -156,42 +159,57 @@ def test_sampler_v2_rejects_more_than_ten_thousand_shots_before_submission():
     assert client.submitted == []
 
 
-def test_estimator_v2_returns_expectation_and_standard_deviation():
-    client = MockClient([{0: 4, 3: 4}])
+def test_estimator_v2_returns_native_server_value_and_std_in_one_job():
+    client = MockClient([SimpleNamespace(status="succeeded", exp_value=1.0, stds=0.125)])
+    primitive = OpenQARPOqtopusEstimatorV2(
+        device_id="qulacs", client=client, n_shots=8
+    )
     circuit = QuantumCircuit(2)
     circuit.h(0)
     circuit.cx(0, 1)
+    from qiskit.quantum_info import SparsePauliOp
+    observable = SparsePauliOp.from_list([("ZZ", 1.0), ("ZX", 0.5)])
 
-    result = OpenQARPOqtopusEstimatorV2(
-        device_id="qulacs", client=client, n_shots=8
-    ).run([(circuit, "ZZ")]).result()
+    result = primitive.run([(circuit, observable)]).result()[0]
 
-    assert isinstance(result[0].data.evs, np.ndarray)
-    assert result[0].data.evs.item() == pytest.approx(1.0)
-    assert result[0].data.stds.item() == pytest.approx(0.0)
-    assert client.submitted[0].shots == 8
-    assert "OPENQASM 3" in client.submitted[0].program
+    assert isinstance(primitive, BaseEstimatorV2)
+    assert result.data.evs.item() == pytest.approx(1.0)
+    assert result.data.stds.item() == pytest.approx(0.125)
+    assert len(client.submitted) == 1
+    spec = client.submitted[0]
+    assert getattr(spec.job_type, "value", spec.job_type) == "estimation"
+    assert spec.shots == 8
+    assert [(term.pauli, term.coeff) for term in spec.operator] == [
+        ("Z 0 Z 1", 1.0), ("X 0 Z 1", 0.5)
+    ]
+    assert "OPENQASM 3" in spec.program
+    assert "measure" not in spec.program.lower()
+    assert "sdg" not in spec.program.lower()
+    assert result.metadata["shots"] == 8
+    assert "shots_per_term" not in result.metadata
 
 
-def test_estimator_v2_precision_overrides_default_shots():
-    client = MockClient([{0: 16}])
+def test_estimator_v2_precision_maps_to_ceil_inverse_square_shots():
+    client = MockClient([SimpleNamespace(status="succeeded", exp_value=0.3, stds=0.1)])
     primitive = OpenQARPOqtopusEstimatorV2(
         device_id="qulacs", client=client, n_shots=16
     )
-    circuit = QuantumCircuit(1)
 
-    result = primitive.run([(circuit, "Z")]).result()
+    result = primitive.run([(QuantumCircuit(1), "Z")], precision=0.3).result()[0]
 
-    assert isinstance(primitive, BaseEstimatorV2)
     assert primitive.default_precision == pytest.approx(0.25)
-    assert client.devices == []
-    assert client.submitted[0].shots == 16
-    assert result[0].data.evs.item() == pytest.approx(1)
+    assert client.submitted[0].shots == 12
+    assert result.data.evs.item() == pytest.approx(0.3)
+    assert result.data.stds.item() == pytest.approx(0.1)
+    assert result.metadata["shots"] == 12
 
 
 def test_estimator_v2_broadcasts_observable_grid_over_parameter_sweep():
+    values = [1.0, -1.0, 0.0, 0.0]
+    stds = [0.1, 0.2, 0.3, 0.4]
     client = MockClient([
-        {0: 4}, {1: 4}, {0: 2, 1: 2}, {0: 2, 1: 2},
+        SimpleNamespace(status="succeeded", exp_value=value, stds=std)
+        for value, std in zip(values, stds, strict=True)
     ])
     primitive = OpenQARPOqtopusEstimatorV2(
         device_id="qulacs", client=client, n_shots=4
@@ -206,41 +224,42 @@ def test_estimator_v2_broadcasts_observable_grid_over_parameter_sweep():
 
     assert result.data.evs.shape == (2, 2)
     np.testing.assert_allclose(result.data.evs, [[1, -1], [0, 0]])
-    assert result.data.stds[1, 0] == pytest.approx(np.sqrt(1 / 3))
+    np.testing.assert_allclose(result.data.stds, [[0.1, 0.2], [0.3, 0.4]])
     assert len(client.submitted) == 4
     assert all(spec.shots == 4 for spec in client.submitted)
+    assert all(getattr(spec.job_type, "value", spec.job_type) == "estimation" for spec in client.submitted)
+    assert result.metadata["shots"] == 4
 
 
-@pytest.mark.parametrize(
-    ("gate", "observable", "expected"),
-    [("h", "X", 1.0), ("y_plus", "Y", 1.0)],
-)
-def test_estimator_v2_uses_qiskit_x_and_y_measurement_bases(gate, observable, expected):
-    client = MockClient([{0: 8}])
+def test_estimator_v2_sends_x_and_y_terms_without_basis_rotation():
+    from qiskit.quantum_info import SparsePauliOp
+
+    client = MockClient([SimpleNamespace(status="succeeded", exp_value=0.25, stds=0.05)])
     primitive = OpenQARPOqtopusEstimatorV2(device_id="qulacs", client=client, n_shots=8)
     circuit = QuantumCircuit(1)
-    if gate == "h":
-        circuit.h(0)
-    else:
-        circuit.h(0)
-        circuit.s(0)
+    circuit.h(0)
+    observable = SparsePauliOp.from_list([("X", 1.0), ("Y", 0.5)])
 
     result = primitive.run([(circuit, observable)]).result()[0]
 
-    assert result.data.evs.item() == pytest.approx(expected)
-    if observable == "Y":
-        assert "sdg" in client.submitted[0].program.lower()
+    assert result.data.evs.item() == pytest.approx(0.25)
+    assert len(client.submitted) == 1
+    assert [(term.pauli, term.coeff) for term in client.submitted[0].operator] == [
+        ("X 0", 1.0), ("Y 0", 0.5)
+    ]
+    assert "sdg" not in client.submitted[0].program.lower()
+    assert "measure" not in client.submitted[0].program.lower()
 
 
-def test_estimator_v2_identity_only_returns_constant_without_jobs():
-    client = MockClient([])
+def test_estimator_v2_identity_observable_is_sent_to_server():
+    client = MockClient([SimpleNamespace(status="succeeded", exp_value=2.0, stds=0.0)])
     primitive = OpenQARPOqtopusEstimatorV2(device_id="qulacs", client=client)
 
     result = primitive.run([(QuantumCircuit(1), "I")]).result()[0]
 
-    assert result.data.evs.item() == pytest.approx(1)
-    assert result.metadata["shots_per_term"] == 0
-    assert client.submitted == []
+    assert result.data.evs.item() == pytest.approx(2)
+    assert len(client.submitted) == 1
+    assert [(term.pauli, term.coeff) for term in client.submitted[0].operator] == [("I 0", 1.0)]
 
 
 @pytest.mark.parametrize("precision", [0, -0.1, float("nan")])
@@ -285,7 +304,7 @@ def test_qiskit_custom_gate_is_serialized_without_local_transpilation():
 def test_estimator_large_finite_coefficients_do_not_overflow_variance():
     from qiskit.quantum_info import SparsePauliOp
 
-    client = MockClient([{0: 2}])
+    client = MockClient([SimpleNamespace(status="succeeded", exp_value=1e200, stds=0.0)])
     primitive = OpenQARPOqtopusEstimatorV2(device_id="qulacs", client=client)
     observable = SparsePauliOp.from_list([("Z", 1e200)])
     result = primitive.run(

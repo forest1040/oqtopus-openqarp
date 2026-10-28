@@ -5,12 +5,13 @@ Sampler bit arrays expand aggregate counts; temporal shot order is unavailable.
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from math import ceil, hypot, isfinite, nextafter, sqrt
+from math import ceil, isfinite, nextafter, sqrt
 from numbers import Real
 from threading import Lock
 from uuid import uuid4
 
 import numpy as np
+from oqtopus_client import OqtopusEstimationOperator
 from qiskit import qasm3
 from qiskit.primitives import (
     BaseEstimatorV2, BasePrimitiveJob, BaseSamplerV2, BitArray, DataBin,
@@ -167,45 +168,33 @@ def _precision(value):
     return float(value)
 
 
-def _term_shots(coefficients, precision):
-    norm = hypot(*coefficients)
-    ratio = norm / precision
+def _estimation_shots(precision):
+    ratio = 1.0 / precision
     required = ratio * ratio
     if not isfinite(required) or required > 10_000 + 1e-10:
-        raise CapabilityError("Requested precision requires more than 10,000 shots per Pauli term")
+        raise CapabilityError("Requested precision requires more than 10,000 shots")
     return _shots(max(1, ceil(nextafter(required, -np.inf))))
 
 
-def _measurement(circuit, label):
-    measured = circuit.remove_final_measurements(inplace=False)
-    mask = 0
-    for qubit, pauli in enumerate(reversed(label)):
-        if pauli == "X":
-            measured.h(qubit)
-        elif pauli == "Y":
-            measured.sdg(qubit)
-            measured.h(qubit)
-        if pauli != "I":
-            mask |= 1 << qubit
-    # A fresh register allows original classical registers and mid-circuit records.
-    from qiskit import ClassicalRegister
-    names = {register.name for register in measured.cregs}
-    name = "oqtopus_measure"
-    while name in names:
-        name += "_"
-    offset = measured.num_clbits
-    register = ClassicalRegister(measured.num_qubits, name)
-    measured.add_register(register)
-    measured.measure(range(measured.num_qubits), register)
-    return measured, mask << offset
+def _operators(observable):
+    operators = []
+    for label, coefficient in observable.items():
+        coefficient = float(coefficient)
+        if not isfinite(coefficient):
+            raise ValueError("Pauli coefficients must be finite")
+        pauli = " ".join(
+            f"{axis} {qubit}" for qubit, axis in enumerate(reversed(label)) if axis != "I"
+        ) or "I 0"
+        operators.append(OqtopusEstimationOperator(pauli=pauli, coeff=coefficient))
+    return operators or [OqtopusEstimationOperator(pauli="I 0", coeff=0.0)]
 
 
 class OpenQARPOqtopusEstimatorV2(_PrimitiveConnection, BaseEstimatorV2):
-    """Estimate Pauli sums, allocating independent shots to each Pauli term.
+    """Send complete observables to the native OQTOPUS Cloud estimator.
 
-    precision is a statistical target. Per-term shots are chosen using the
-    sum of squared coefficients; device noise and systematic bias are excluded.
-    Returned stds use count-derived uncertainty, not a fabricated fixed error.
+    Each bound circuit/observable pair becomes one estimation job. Precision
+    maps to ceil(1/precision**2) shots per job, without a local decomposition
+    or precision guarantee. The server's exp_value and stds are returned as-is.
     """
 
     def __init__(
@@ -226,64 +215,32 @@ class OpenQARPOqtopusEstimatorV2(_PrimitiveConnection, BaseEstimatorV2):
         for item in pubs:
             pub = EstimatorPub.coerce(item, precision=default)
             target = _precision(pub.precision)
+            shots = _estimation_shots(target)
             bound = pub.parameter_values.bind_all(pub.circuit)
             observables = np.asarray(pub.observables.tolist(), dtype=object)
             bound, observables = np.broadcast_arrays(bound, observables)
-            points = []
-            for index in np.ndindex(pub.shape):
-                terms, constant = [], 0.0
-                for label, coefficient in observables[index].items():
-                    coefficient = float(coefficient)
-                    if not isfinite(coefficient):
-                        raise ValueError("Pauli coefficients must be finite")
-                    if set(label) <= {"I"}:
-                        constant += coefficient
-                    elif coefficient:
-                        terms.append((label, coefficient))
-                if not isfinite(constant):
-                    raise ValueError("Identity coefficient exceeds float range")
-                shots = _term_shots([c for _, c in terms], target) if terms else 0
-                prepared, masks = [], []
-                for label, coefficient in terms:
-                    circuit, mask = _measurement(bound[index], label)
-                    prepared.append(self._transport.prepare(
-                        _qasm(circuit), n_qubits=circuit.num_qubits,
-                        n_bits=circuit.num_clbits, n_shots=shots,
-                    ))
-                    masks.append((mask, coefficient))
-                points.append((constant, shots, masks, prepared))
-            plans.append((pub.shape, target, points))
+            prepared = [
+                self._transport.prepare_estimation(
+                    _qasm(bound[index]), n_qubits=pub.circuit.num_qubits,
+                    operators=_operators(observables[index]), n_shots=shots,
+                )
+                for index in np.ndindex(pub.shape)
+            ]
+            plans.append((pub.shape, target, shots, prepared))
         return _CloudJob(self._run, plans)
 
     def _run(self, plans):
         with self._lock:
             pub_results = []
-            for shape, precision, points in plans:
+            for shape, precision, shots, prepared in plans:
                 start = len(self.jobs)
-                evs, stds = np.empty(shape), np.empty(shape)
-                allocations = np.zeros(shape, dtype=int)
-                for index, (constant, shots, masks, prepared) in zip(
-                    np.ndindex(shape), points, strict=True
-                ):
-                    value, uncertainty = constant, 0.0
-                    raw = self._transport.execute(prepared)
-                    for (mask, coefficient), result in zip(masks, raw, strict=True):
-                        mean = sum(
-                            (1 if (outcome & mask).bit_count() % 2 == 0 else -1) * count
-                            for outcome, count in result.counts.items()
-                        ) / shots
-                        value += coefficient * mean
-                        variance_of_mean = (
-                            max(0.0, 1 - mean ** 2) / (shots - 1) if shots > 1 else 1.0
-                        )
-                        uncertainty = hypot(uncertainty, coefficient * sqrt(variance_of_mean))
-                    if not isfinite(value) or not isfinite(uncertainty):
-                        raise ValueError("Estimated value or uncertainty exceeds float range")
-                    evs[index], stds[index], allocations[index] = value, uncertainty, shots
+                results = self._transport.execute(prepared)
+                evs = np.asarray([result.exp_value for result in results]).reshape(shape)
+                stds = np.asarray([result.stds for result in results]).reshape(shape)
                 pub_results.append(PubResult(
                     DataBin(evs=evs, stds=stds, shape=shape), metadata={
                         "target_precision": precision, "device_id": self.device_id,
-                        "shots_per_term": allocations.tolist(),
+                        "shots": shots,
                         "job_ids": [job.job_id for job in self.jobs[start:]],
                     },
                 ))

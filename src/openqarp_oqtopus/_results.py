@@ -1,4 +1,4 @@
-"""Job metadata and validated raw sampling counts."""
+"""Job metadata and validated sampling and estimation results."""
 
 from dataclasses import dataclass
 from numbers import Integral
@@ -25,7 +25,7 @@ class OqtopusJobError(RuntimeError):
 
 
 class OqtopusResultError(OqtopusJobError):
-    """A successful job returned invalid measurement counts."""
+    """A successful job returned invalid sampling or estimation data."""
 
 
 @dataclass(frozen=True)
@@ -64,3 +64,26 @@ def sampling_result(result, *, n_shots: int, n_qubits: int, job_id: str):
             "Unable to read sampling counts", job_id=job_id, status="invalid_result"
         ) from error
     return _SamplingResult(normalized, n_shots, n_qubits)
+
+
+@dataclass(frozen=True)
+class _EstimationResult:
+    exp_value: float
+    stds: float
+
+
+def estimation_result(result, *, job_id: str):
+    from math import isfinite
+    from numbers import Real
+
+    try:
+        value, stds = result.exp_value, result.stds
+        if (isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value)
+                or isinstance(stds, bool) or not isinstance(stds, Real)
+                or not isfinite(stds) or stds < 0):
+            raise ValueError("Invalid expectation value or standard deviation")
+        return _EstimationResult(float(value), float(stds))
+    except Exception as error:
+        raise OqtopusResultError(
+            "Unable to read estimation result", job_id=job_id, status="invalid_result"
+        ) from error

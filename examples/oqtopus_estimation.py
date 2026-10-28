@@ -1,13 +1,12 @@
-"""Validate Cloud estimation and parameter sweeps against analytic values."""
+"""Validate native Cloud estimation and bound parameters against analytic values."""
 
 import argparse
 import json
 from dataclasses import asdict
-from math import pi
+from math import cos, pi
 from pathlib import Path
 
 from oqtopus_client import OqtopusClient, OqtopusConfig
-from qarp.algorithms import Sampler
 from qarp.blocks import SimpleBlock
 from qarp.operators import QubitOperator
 from sympy import Symbol
@@ -21,6 +20,8 @@ def main():
     parser.add_argument("--section", default="default")
     parser.add_argument("--device-id", default="qulacs")
     parser.add_argument("--shots", type=int, default=1000)
+    parser.add_argument("--parameter-check", action="store_true",
+                        help="Also exercise parameterized Ry estimation (known server error)")
     parser.add_argument("--output", type=Path, default=Path("artifacts/remote-estimation.json"))
     args = parser.parse_args()
     sampler = OpenQARPOqtopusSampler(
@@ -43,26 +44,29 @@ def main():
 
         asymmetric = SimpleBlock(2)
         asymmetric.x(0)
+        asymmetric.h(1)
         value = estimator.estimate(
-            ket=asymmetric, operator=QubitOperator("Z0") - 2 * QubitOperator("Z1")
+            ket=asymmetric, operator=QubitOperator("Z0") - 2 * QubitOperator("X1")
         )
-        values["x0_Z0_minus_twice_Z1"] = value
+        values["one_plus_Z0_minus_twice_X1"] = value
         assert abs(value + 3.0) < 1e-10
         before = len(sampler.jobs)
         values["constant"] = estimator.estimate(ket=asymmetric, operator=QubitOperator("", 2.5))
-        assert values["constant"] == 2.5 and len(sampler.jobs) == before
+        assert values["constant"] == 2.5 and len(sampler.jobs) == before + 1
         print(json.dumps(values), flush=True)
 
-        theta = Symbol("theta")
-        circuit = SimpleBlock(1)
-        circuit.ry(0, theta)
-        results = sampler.executor.batch_run(
-            [Sampler(ket=circuit)], [{theta: angle} for angle in (0.0, pi / 3, pi)]
-        )
-        values["ry_sweep_p1"] = [row[0].get((1,), 0.0) for row in results]
-        assert values["ry_sweep_p1"][0] == 0.0
-        assert abs(values["ry_sweep_p1"][1] - 0.25) < 0.075
-        assert values["ry_sweep_p1"][2] == 1.0
+        if args.parameter_check:
+            theta = Symbol("theta")
+            circuit = SimpleBlock(1)
+            circuit.ry(0, theta)
+            angles = (0.2, pi / 3, pi - 0.2)
+            values["ry_angles"] = list(angles)
+            values["ry_sweep_z"] = [
+                estimator.estimate(ket=circuit, operator=QubitOperator("Z0"), params={theta: angle})
+                for angle in angles
+            ]
+            assert all(abs(value - cos(angle)) < 0.1
+                       for value, angle in zip(values["ry_sweep_z"], angles, strict=True))
     except Exception as error:
         report = {"ok": False, "error_type": type(error).__name__}
     else:

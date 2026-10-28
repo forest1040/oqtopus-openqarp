@@ -52,7 +52,9 @@ print(estimate.data.evs, estimate.data.stds)  # 1.5, 0.0
 
 Sampler の結果は古典レジスタごとの `BitArray` です。`QuantumCircuit(2, 2)` の既定レジスタは `data.c`、`measure_all()` が追加するレジスタは `data.meas` です。整数の bit i は古典ビット i に対応し、文字列は bit 0 が右端です。任意の終端測定写像と複数レジスタに対応します。OQTOPUS が返す集計 counts を展開するため、元の shot 実行順は復元しません。複数レジスタは同じ joint outcome 列から射影して相関を保ちます。
 
-Estimator は Pauli 項ごとに測定回路を生成します。X/Y の基底測定に必要な H/Sdg と終端測定を追加し、終端測定済みの入力ではその測定を置き換えます。precision の既定値は `1/sqrt(n_shots)`、各項の shots は `ceil(sum(coeff**2)/precision**2)`（最小1）です。10,000を超える要求は送信前に拒否します。`stds` は counts から推定する独立測定の標準誤差です。precision は統計的な目標で、デバイスノイズや系統誤差を含みません。恒等項だけの計算はジョブを送信しません。
+Estimator は束縛済み回路と observable 全体を1つの `estimation` ジョブで送信します。オブザーバブルの分解・グルーピング・測定回路の生成・実行・期待値集計はサーバ側が担当します。こちらでは回路を QASM 3、Pauli 和を SDK の演算子配列に変換し、サーバの `exp_value` / `stds` を `evs` / `stds` に格納します。入力回路への基底回転や測定の追加、標準偏差の再計算は行いません。
+
+precision の既定値は `1/sqrt(n_shots)`、ジョブの shots は `ceil(1/precision**2)`（最小1）です。PUB の precision > `run(precision=...)` > 既定値の順で適用し、10,000を超える要求は送信前に拒否します。この規則は shots への換算で、達成精度の保証を意味しません。項ごとの shots 配分は行いません。恒等・ゼロ observable も全体をサーバへ送信します。
 
 同じインスタンスのジョブは順次実行されます。`job.cancel()` は開始前のローカル待機を取消すもので、実行中のクラウドジョブを取消しません。クラウド job_id は結果の metadata と `sampler.jobs` / `estimator.jobs` に残ります。
 
@@ -137,7 +139,7 @@ print(value)  # 1.0
 print(sampler.jobs)  # job_id・接続先・shots・状態の履歴
 ```
 
-`device_id` は必須で、生成後は読取専用です。別の接続先を使う場合は別インスタンスを作ります。`sample` は OpenQARP の `SamplingDistribution` を返し、キーは qubit 0 が先頭の LSB 順タプル、値は確率です。`params={symbol: value}`、`n_shots=...`、`measured_qubits=[...]` を指定できます。Estimator の shots は測定グループごとの回数です。
+`device_id` は必須で、生成後は読取専用です。別の接続先を使う場合は別インスタンスを作ります。`sample` は OpenQARP の `SamplingDistribution` を返し、キーは qubit 0 が先頭の LSB 順タプル、値は確率です。`params={symbol: value}`、`n_shots=...`、`measured_qubits=[...]` を指定できます。Estimator の `n_shots` は observable 全体を渡す1つの estimation ジョブに指定します。`grouping` の指定はサーバに任せるため受け付けません。
 
 標準の OpenQARP プリミティブを使う場合は `sampler.executor.build([...])` / `run(params=...)` / `batch_run(...)` が使えます。`batch_run` の結果は `[parameter_set][primitive]` の順です。すべて同期実行で、同一インスタンスの並行呼出しは非対応です。
 
@@ -147,19 +149,17 @@ OpenQARP の命令列は QASM 3 としてそのまま出力します。トラン
 
 ## クラウドでの検証例
 
-次のコマンドは `qulacs` に各回路1,000 shotsのジョブを送ります。sampling は X0 / X1 / Bell の3回路、estimation は二つの期待値回路と Ry の3点 sweep です。通常テストからは実行されません。
+次のコマンドは `qulacs` にジョブを送ります。sampling は X0 / X1 / Bell の3回路を各1,000 shots、estimation は Bell・符号付き observable・恒等項の計3回を各1,000 shotsで実行します。Qiskit 例は sampling 2回を各1,000 shots、native estimation 1回を400 shotsで実行します。通常テストからは実行されません。
 
 ```sh
 MPLCONFIGDIR=artifacts/matplotlib uv run --locked python examples/oqtopus_sampling.py \
   --config ~/.oqtopus --device-id qulacs
 MPLCONFIGDIR=artifacts/matplotlib uv run --locked python examples/oqtopus_estimation.py \
-  --config ~/.oqtopus --device-id qulacs
+  --config ~/.oqtopus --device-id qulacs --output artifacts/remote-native-estimation-basic.json
 MPLCONFIGDIR=artifacts/matplotlib uv run --locked --extra qiskit python examples/qiskit_cloud.py \
-  --config ~/.oqtopus --device-id qulacs
+  --config ~/.oqtopus --device-id qulacs --output artifacts/remote-native-qiskit.json
 ```
 
-結果とジョブIDは `artifacts/remote-sampling.json` / `artifacts/remote-estimation.json` に保存します。2026-10-28 の sampling 検証では X0=`(1,0)`、X1=`(0,1)` に確率1、Bell は `(0,0)=0.521` / `(1,1)=0.479` でした。整数キーへの変換に追加のビット反転は不要でした。Estimator は Bell の `ZZ+0.5XX=1.5`、X0 状態の `Z0−2Z1=−3.0`、Ry(0,π/3,π) の P(1) は `0, 0.255, 1` で、全8ジョブが成功しました。オフラインのアダプタ試験37件、関連 upstream 試験90件も成功しています。
+2026-10-28 に Qiskit 例の3ジョブが成功しました。Bell の counts は `00=507, 11=493`、古典ビットの対応を入れ替えた回路は `low=0, high=1`。observable `ZZ+0.5XX` 全体の estimation 結果は `evs=1.5, stds=0.0` でした。ローカルのビット反転は行っていません。オフライン試験は67件成功しています。native OpenQARP Estimator の Bell・符号付き observable・恒等項の3ジョブも成功し、値は順に1.5・−3・2.5でした。最新 wheel を別環境へインストールした試験は67件成功、Qiskit extra なしでは50件成功・1モジュールskipでした。
 
-Qiskit の検証は `artifacts/remote-qiskit.json` に保存します。2026-10-28 にローカル transpile なしで4ジョブが成功しました。Bell は `00=510, 11=490`、古典ビットの対応を入れ替えた回路は `low=0, high=1` に各1,000回、期待値は `1.5`、標準誤差は `0.0` でした。
-
-現在のテストは62件すべて成功しています。別の uv 環境に wheel を通常インストールし、開発元の外から同じ62件が通ることも確認しました。Qiskit extra を入れない別環境では44件成功、Qiskit テスト1モジュールが skip となり、基本 API の import と動作を確認できています。
+サーバ側で確認したエラー: `qubit[2]` に対して q0 だけを操作し、observable が q1 を参照する場合に「量子ビット数1では index 1を参照できない」と返りました。Ry(0) と Z0 でも量子ビット数0という同種のエラー、Ry(0.2) と Z0 では gRPC INTERNAL `Failed to serialize response!` を確認しました。クライアントは入力を補正せず、ジョブIDを保持した `OqtopusJobError` を返します。`examples/oqtopus_estimation.py --parameter-check` は後者を再現する追加チェックです。詳細と失敗ジョブIDは設計・検証記録に記載しています。

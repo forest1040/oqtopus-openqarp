@@ -8,7 +8,7 @@ from numbers import Integral
 from oqtopus_client import OqtopusJobSpec
 from qarp.errors import CapabilityError
 
-from ._results import JobRecord, OqtopusJobError, sampling_result
+from ._results import JobRecord, OqtopusJobError, estimation_result, sampling_result
 
 
 def _shots(value):
@@ -67,6 +67,19 @@ class _CloudTransport:
         spec.to_model()
         return spec, int(n_qubits), int(n_bits)
 
+    def prepare_estimation(self, program, *, n_qubits, operators, n_shots=None):
+        if isinstance(n_qubits, bool) or not isinstance(n_qubits, Integral) or n_qubits < 1:
+            raise CapabilityError("Circuit width must be a positive integer")
+        if not isinstance(program, str) or not program.strip():
+            raise ValueError("program must be a nonempty string")
+        shots = _shots(self.n_shots if n_shots is None else n_shots)
+        spec = OqtopusJobSpec.estimation(
+            device_id=self.device_id, program=program, shots=shots,
+            operator=operators, transpiler_info=deepcopy(self._transpiler_info),
+        )
+        spec.to_model()
+        return spec, int(n_qubits), None
+
     def execute(self, prepared):
         results = []
         for spec, n_qubits, n_bits in prepared:
@@ -81,9 +94,12 @@ class _CloudTransport:
                 self._jobs[index] = replace(record, status=status)
                 if status != "succeeded":
                     raise OqtopusJobError("Cloud job did not succeed", job_id=job_id, status=status)
-                results.append(sampling_result(
-                    result, n_shots=spec.shots, n_qubits=n_bits, job_id=job_id
-                ))
+                if getattr(spec.job_type, "value", spec.job_type) == "estimation":
+                    results.append(estimation_result(result, job_id=job_id))
+                else:
+                    results.append(sampling_result(
+                        result, n_shots=spec.shots, n_qubits=n_bits, job_id=job_id
+                    ))
             except OqtopusJobError as error:
                 self._jobs[index] = replace(record, status=error.status)
                 raise
