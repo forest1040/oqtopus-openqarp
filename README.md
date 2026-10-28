@@ -163,3 +163,14 @@ MPLCONFIGDIR=artifacts/matplotlib uv run --locked --extra qiskit python examples
 2026-10-28 に Qiskit 例の3ジョブが成功しました。Bell の counts は `00=507, 11=493`、古典ビットの対応を入れ替えた回路は `low=0, high=1`。observable `ZZ+0.5XX` 全体の estimation 結果は `evs=1.5, stds=0.0` でした。ローカルのビット反転は行っていません。オフライン試験は67件成功しています。native OpenQARP Estimator の Bell・符号付き observable・恒等項の3ジョブも成功し、値は順に1.5・−3・2.5でした。最新 wheel を別環境へインストールした試験は67件成功、Qiskit extra なしでは50件成功・1モジュールskipでした。
 
 サーバ側で確認したエラー: `qubit[2]` に対して q0 だけを操作し、observable が q1 を参照する場合に「量子ビット数1では index 1を参照できない」と返りました。Ry(0) と Z0 でも量子ビット数0という同種のエラー、Ry(0.2) と Z0 では gRPC INTERNAL `Failed to serialize response!` を確認しました。クライアントは入力を補正せず、ジョブIDを保持した `OqtopusJobError` を返します。`examples/oqtopus_estimation.py --parameter-check` は後者を再現する追加チェックです。詳細と失敗ジョブIDは設計・検証記録に記載しています。
+
+## OpenQARP examples の実行結果
+
+元ノートブックから16量子ビット以内の7例を選び、`qulacs`へ各2,000 shotsで送信しました。Grover、QAOA、QPE、疎状態準備、一様重ね合わせ、Trotter、QROMの全7例が成功し、解析値・ローカル厳密分布と整合しました。出典・パラメータ・元例との差分・ジョブID・測定分布は [実行結果](docs/openqarp-examples-results.md) に保存しています。QAOAはローカルで最適化した最終回路のクラウド測定です。
+
+```sh
+MPLCONFIGDIR=artifacts/matplotlib uv run --locked --extra qiskit python examples/run_openqarp_examples.py \
+  --config ~/.oqtopus --device-id qulacs --shots 2000
+```
+
+このコマンドは7つのsamplingジョブを送信します。既存JSONからMarkdownだけを再生成する場合は `--render artifacts/openqarp-examples/results.json` を使います。
